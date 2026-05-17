@@ -1,0 +1,483 @@
+---
+title: "ABC Beverage - Manufacturing Process Predictive Modeling for pH Optimization"
+subtitle: "DATA 624: Predictive Analytics - Technical Report"
+author: "Arutam Antunish"
+date: "`r format(Sys.Date(), '%B, %d, %Y')`"
+output:
+  html_document:
+    self_contained: false
+    toc: true
+    toc_depth: 2
+    number_sections: true
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+    keep_tex: true
+    fig_caption: true
+geometry: "margin=0.5in"
+fontsize: 11pt
+mainfont: "Helvetica"
+monofont: "Menlo"
+linkcolor: blue
+urlcolor: blue
+header-includes:
+  - \usepackage{xcolor}
+  - \usepackage{fvextra}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
+  - \usepackage{graphicx}
+  - \usepackage{float}
+  - \usepackage{microtype}
+  - \usepackage{setspace}
+  - \setstretch{1.05}
+  - \setlength{\emergencystretch}{1em}
+  - \makeatletter
+  - \def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
+  - \def\maxheight{\ifdim\Gin@nat@height>0.85\textheight0.85\textheight\else\Gin@nat@height\fi}
+  - \makeatother
+  - \setkeys{Gin}{width=\maxwidth,height=\maxheight,keepaspectratio}
+  - \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 4,
+  dpi = 144,
+  fig.align = "center"
+)
+
+library(ggplot2)
+# Tufte / minimal-ink plotting defaults.
+theme_set(
+  theme_minimal(base_size = 11) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      legend.position = "top",
+      plot.title.position = "plot",
+      plot.caption.position = "plot",
+      axis.title.x = element_blank(),
+      axis.title.y = element_text(margin = ggplot2::margin(r = 6))
+    )
+)
+
+update_geom_defaults("line", list(linewidth = 0.45))
+update_geom_defaults("point", list(size = 1.2))
+```
+
+
+# Executive Introduction & Project Context
+
+In response to new regulatory directives, this technical investigation establishes a robust predictive modeling framework to understand, quantify, and forecast the factors influencing pH levels within the ABC Beverage manufacturing process. Maintaining tight control over pH is a vital operational benchmark for product quality, chemical stability, and regulatory compliance.
+
+This report documents a comprehensive data science workflow, transforming noisy, raw production telemetry into a high-performance predictive system. By leveraging advanced preprocessing methods and diverse machine learning algorithms via the caret ecosystem, we build an optimized framework tailored to the specific dynamics of our manufacturing line.
+
+```{r}
+# Loading core data science and modeling libraries
+library(tidyverse)
+library(caret)
+library(corrplot)
+library(RColorBrewer)
+library(mice)       # Multivariate Imputation by Chained Equations
+```
+
+# Comprehensive Exploratory Data Analysis (EDA)
+
+## Data Loading via GitHub Remote Repository
+
+To facilitate seamless group collaboration and ensure reproducibility across all team members' environments, the historical training telemetry and the final evaluation sets are loaded directly via GitHub raw URLs.
+
+```{r}
+
+# Define explicit URLs
+train_url <- "https://raw.githubusercontent.com/arutam-antunish/Data_624_Final-Project/refs/heads/main/StudentData.csv"
+
+
+evaluation_url <- "https://raw.githubusercontent.com/arutam-antunish/Data_624_Final-Project/refs/heads/main/StudentEvaluation.csv"
+
+# Load historical datasets directly from remote workspace
+train_data <- read_csv(train_url)
+evaluation_data <- read_csv(evaluation_url)
+
+# Clean column names to make them structurally valid for R syntax (remover spaces/symbols)
+colnames(train_data) <- make.names(colnames(train_data))
+colnames(evaluation_data) <- make.names(colnames(evaluation_data))
+
+# Dimensional integrity checks
+print(paste("Training Set Rows:", nrow(train_data), "| Columns:", ncol(train_data)))
+print(paste("Evaluation Set Rows:", nrow(evaluation_data), "| Columns:", ncol(evaluation_data)))
+```
+## Target Variable Diagnostic: pH Distribution
+
+Our target parameter is PH. Evaluating its structural distribution, baseline variance, and central tendencies is crucial before implementing feature transformations.
+
+```{r}
+# Descriptive statistics for manufacturing pH
+summary_ph <- train_data %>% 
+  summarise(
+    Mean = mean(PH, na.rm = TRUE),
+    Median = median(PH, na.rm = TRUE),
+    SD = sd(PH, na.rm = TRUE),
+    Min = min(PH, na.rm = TRUE),
+    Max = max(PH, na.rm = TRUE),
+    Missing_Count = sum(is.na(PH))
+  )
+print(summary_ph)
+
+# Target density profiling
+ggplot(train_data, aes(x = PH)) +
+  geom_histogram(aes(y = ..density..), bins = 40, fill = "#2c3e50", color = "white", alpha = 0.8) +
+  geom_density(color = "#e74c3c", size = 1.2) +
+  theme_classic() +
+  labs(title = "Distribution Profiling of Manufacturing pH", x = "pH Level", y = "Density")
+```
+
+## Feature Space Deficiency: Missing Value Analysis
+
+To directly resolve historical data cleaning oversights, we calculate the exact missing percentage across all telemetry features to properly inform our multivariate imputation layer.
+
+```{r}
+# Quantify missing data metrics per column
+missing_pct <- colMeans(is.na(train_data)) * 100
+missing_df <- data.frame(Variable = names(missing_pct), Missing_Percentage = missing_pct) %>% 
+  filter(Missing_Percentage > 0) %>% 
+  arrange(desc(Missing_Percentage))
+
+# Visualize feature data completeness gaps
+ggplot(missing_df, aes(x = reorder(Variable, Missing_Percentage), y = Missing_Percentage)) +
+  geom_bar(stat = "identity", fill = "#34495e", width = 0.7) +
+  coord_flip() +
+  theme_classic() +
+  labs(title = "Predictor Space Missing Data Matrix", x = "Process Features", y = "Percentage Missing (%)")
+```
+
+# Advanced Preprocessing Pipeline
+
+## Target Isolation, Categorical Cleaning & Empirical Outlier Capping
+
+We remove records where the target variable PH is missing or recorded as an impossible 0. Crucially, because Brand.Code is a categorical factor with missing observations that cannot be mathematically processed by knnImpute, we filter out records with missing Brand.Code values to secure clean data alignment.
+
+```{r}
+# Drop records missing the target, containing impossible 0 values, or missing Brand.Code
+train_clean <- train_data %>% 
+  filter(!is.na(PH) & PH > 0) %>% 
+  filter(!is.na(Brand.Code))
+
+# Isolate target variable and feature space
+target <- train_clean$PH
+features <- train_clean %>% select(-PH)
+
+# Enforce explicit factor status for qualitative variables across both splits
+features$Brand.Code <- as.factor(features$Brand.Code)
+
+if("Brand.Code" %in% colnames(evaluation_data)) {
+  evaluation_data$Brand.Code <- as.factor(evaluation_data$Brand.Code)
+}
+
+# Separate variable types
+numeric_features <- features %>% select(where(is.numeric))
+categorical_features <- features %>% select(where(is.factor))
+
+# Cap statistical outliers beyond physical operational expectations (1st and 99th boundaries)
+cap_outliers <- function(x) {
+  q <- quantile(x, probs = c(0.01, 0.99), na.rm = TRUE)
+  x[x < q[1]] <- q[1]
+  x[x > q[2]] <- q[2]
+  return(x)
+}
+
+numeric_capped <- as.data.frame(lapply(numeric_features, cap_outliers))
+
+
+```
+
+# Near-Zero Variance Screening, Structural Imputation, and Box-Cox Transform
+
+Adhering strictly to textbook workflows, we employ a unified caret::preProcess module. This script scans and drops features with Near-Zero Variance (nzv), uses K-Nearest Neighbors structural similarity (knnImpute) to replace missing numerical variables (like MFR), computes optimized Box-Cox transformations to correct profile skewness, and applies centering and scaling normalization.
+
+```{r}
+# Configure and fit unified data cleaning parameters onto training features
+prep_parameters <- preProcess(
+  numeric_capped, 
+  method = c("nzv", "knnImpute", "BoxCox", "center", "scale")
+)
+
+# Apply operations onto numeric features
+numeric_transformed <- predict(prep_parameters, numeric_capped)
+
+# Re-couple processed numerical columns with categorical keys
+final_features <- cbind(categorical_features, numeric_transformed)
+final_train_set <- cbind(final_features, PH = target)
+
+# Print execution output of transformations to inspect drop/impute parameters
+print(prep_parameters)
+```
+# Competitive Statistical Modeling
+
+To discover the absolute best predictive architecture for the ABC Beverage manufacturing line, we evaluate four distinct classes of machine learning algorithms featured throughout our Predictive Analytics curriculum. Every model is optimized using a repeated $5$-fold cross-validation strategy to protect against overfitting and ensure true generalizability.
+
+```{r}
+# Setup parallel backend to speed up model training across multiple CPU cores
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+```
+
+## Cross-Validation Strategy Setup
+
+Adhering to the validation standards outlined in Chapter 4 of Kuhn & Johnson, we establish a repeated cross-validation control block. This ensures each model is evaluated across 15 distinct data resamples before selecting optimal tuning parameters.
+
+```{r}
+# Configure repeated 5-fold cross-validation framework
+train_control <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  verboseIter = FALSE
+)
+```
+
+## Model A: Partial Least Squares (PLS) 
+
+We begin with a linear framework designed specifically for collinear data spaces. PLS manages highly correlated manufacturing features by projecting them into lower-dimensional latent spaces.
+
+```{r}
+set.seed(42)
+model_pls <- train(
+  PH ~ ., 
+  data = final_train_set, 
+  method = "pls",
+  tuneLength = 15,
+  trControl = train_control
+)
+print(model_pls)
+```
+### Model A Diagnostics
+
+Based on the minimum root mean squared error criterion, the optimal Partial Least Squares configuration uses ncomp = 15 latent components. At this parameters peak, the model achieves a cross-validated RMSE of 0.1319 and explains 41.26% of the underlying variance ($R^2 = 0.4126$) in beverage pH levels. While these linear combinations establish a solid baseline, the (~41.3%) variance explanation rate strongly indicates that non-linear architectures may be required to capture the remaining process interactions.
+
+## Model B: Support Vector Machines with Radial Basis Function (SVM Radial)
+
+To capture non-linear relationships and threshold operational effects within the production metrics without assuming a rigid parametric form, we implement a Support Vector Machine with a radial basis function kernel.
+
+```{r}
+set.seed(42)
+model_svm <- train(
+  PH ~ .,
+  data = final_train_set,
+  method = "svmRadial",
+  tuneLength = 5,
+  trControl = train_control
+)
+print(model_svm)
+```
+### Model B Diagnostics: 
+
+Utilizing a fixed sigma = 0.0220, the cross-validation protocol selected a cost parameter of C = 4.00 as optimal. Transitioning to a non-linear kernel space significantly improves upon the linear baseline, reducing the cross-validated RMSE to 0.1115 and raising the variance explanation capacity to 58.14% ($R^2 = 0.5814$). This clear performance boost confirms that non-linear boundary adjustments are vital for modeling production line pH thresholds.
+
+## Model C: Random Forest (RF) Ensembles
+
+Moving into tree-based architectures, Random Forest builds a robust ensemble of independent decision trees via bagging. It inherently captures complex high-order variable interactions and provides an assessment of variable importance.
+
+```{r}
+set.seed(42)
+model_rf <- train(
+  PH ~ ., 
+  data = final_train_set, 
+  method = "rf",
+  tuneLength = 3,
+  trControl = train_control,
+  importance = TRUE
+)
+print(model_rf)
+```
+
+### Model C Diagnostics: 
+
+The optimal Random Forest configuration selected mtry = 17 (the number of random predictors sampled at each tree split). This ensemble architecture yields a substantial performance jump, achieving a cross-validated RMSE of 0.0958 and accounting for 70.38% of the underlying operational variance ($R^2 = 0.7038$). Aggregating un-correlated decision trees effectively uncovers high-order variable dependencies without suffering from model overfitting.
+
+## Model D: Stochastic Gradient Boosting (GBM)
+
+GBM is an advanced boosting technique that builds sequential decision trees, where each new tree systematically minimizes the residual errors of the prior ones. This often achieves maximum predictive accuracy in noisy manufacturing datasets.
+
+```{r}
+set.seed(42)
+model_gbm <- train(
+  PH ~ ., 
+  data = final_train_set, 
+  method = "gbm",
+  tuneLength = 3,
+  trControl = train_control,
+  verbose = FALSE
+)
+print(model_gbm)
+```
+
+### Model D Diagnostics: 
+
+The Gradient Boosting Machine optimized its sequential weak learners at n.trees = 150 and an interaction.depth = 3 (holding learning rate constant at shrinkage = 0.1). While the boosting algorithm performs exceptionally well, its peak cross-validated RMSE of 0.1154 and variance explanation rate of 55.34% ($R^2 = 0.5534$) falls short of the Random Forest benchmark, indicating that independent bagging handled the noisy feature spaces of this plant more effectively than sequential optimization.
+
+# Model Performance Metrics & Selection
+
+To make a rigorous final choice, we pool the cross-validation resampling vectors from all four architectures. This ensures we are evaluating their performance consistency across identical data splits.
+
+```{r}
+# Compile and aggregate cross-validation metrics across all models
+model_results <- resamples(list(
+  PLS = model_pls,
+  SVM_Radial = model_svm,
+  Random_Forest = model_rf,
+  Gradient_Boosting = model_gbm
+))
+
+# Output a clean summary table of performance distributions
+summary(model_results)
+```
+## Comprehensive Performance Comparison Matrix
+
+The table below summarizes the average cross-validated performance metrics across the 15 data resamples:
+
+```{r}
+
+# Create a structured data frame with the final model metrics
+comparison_metrics <- tibble::tribble(
+  ~`Algorithm Class`,         ~`Cross-Validated RMSE`, ~`R-squared (Variance)`, ~`Mean Absolute Error (MAE)`,
+  "Model A: PLS",             0.1319,                  "41.26%",                0.1024,
+  "Model B: SVM Radial",      0.1115,                  "58.14%",                0.0816,
+  "Model C: Random Forest*",  0.0958,                  "70.38%",                0.0691,
+  "Model D: Stochastic GBM",  0.1154,                  "55.34%",                0.0880
+)
+
+# Render a clean, professional HTML table for the Rmd report
+knitr::kable(
+  comparison_metrics, 
+  caption = "Final Performance Comparison Matrix Across 15 Resamples",
+  align = "lccc"
+)
+```
+
+
+## Final Selection & Structural Insights
+
+### The Clear Winner: 
+
+Model C (Random Forest) outclasses all competing frameworks across every single metric. It minimizes the prediction error to a mean RMSE of 0.0958 and captures 70.38% of the underlying variance in beverage pH.
+
+### Methodological Justification: 
+
+The significant 30% jump in $R^2$ from the linear baseline (PLS) to Random Forest proves that the chemical dynamics governing pH adjustments on the manufacturing line are heavily non-linear. Furthermore, the fact that Random Forest outpaced Gradient Boosting (GBM) suggests that independent tree bagging handles the noisy sensor variations of this specific plant data more robustly than sequential boosting.
+
+# Final Evaluation Predictions & Export
+
+With the Random Forest model selected as our optimal predictive architecture, we prepare the final evaluation dataset (StudentEvaluation.csv). To guarantee analytical consistency, we apply the exact same mathematical transformation pipeline (KNN imputation, Box-Cox, centering, and scaling) before generating our final predictions.
+
+## Evaluation Set Preprocessing Implementation
+
+We align the evaluation set columns with our trained model structure, implement structural imputation for both numeric variables and categorical levels, and execute the saved preprocessing parameters.
+
+```{r}
+# Add a unique row identifier to the original evaluation data to prevent row loss
+evaluation_data <- evaluation_data %>% mutate(Row_ID = row_number())
+
+# Isolate feature space for the evaluation set (dropping PH column if it exists as placeholder)
+eval_features <- evaluation_data %>% select(-any_of("PH"))
+
+# Convert Brand.Code to factor and explicitly handle any missing or blank levels
+eval_features$Brand.Code <- as.character(eval_features$Brand.Code)
+eval_features$Brand.Code[is.na(eval_features$Brand.Code) | eval_features$Brand.Code == ""] <- "A" # Assign to majority class
+eval_features$Brand.Code <- as.factor(eval_features$Brand.Code)
+
+# Separate variable types for evaluation data and force pure data frame structures
+eval_numeric <- eval_features %>% 
+  select(Row_ID, where(is.numeric)) %>% 
+  as.data.frame()
+
+eval_categorical <- eval_features %>% 
+  select(Row_ID, where(is.factor)) %>% 
+  as.data.frame()
+
+# Safety Patch 1: Impute any remaining evaluation NAs with column medians
+for(i in 2:ncol(eval_numeric)) { # Start at 2 to skip Row_ID
+  if(any(is.na(eval_numeric[, i]))) {
+    median_val <- median(eval_numeric[, i], na.rm = TRUE)
+    eval_numeric[is.na(eval_numeric[, i]), i] <- median_val
+  }
+}
+
+# Apply the trained caret preProcess parameters directly onto evaluation numeric features (excluding Row_ID)
+eval_numeric_transformed <- predict(prep_parameters, eval_numeric %>% select(-Row_ID))
+
+# Safety Patch 2: Replace any Inf or -Inf values generated by transformations with finite limits
+for(i in 1:ncol(eval_numeric_transformed)) {
+  col_data <- eval_numeric_transformed[, i]
+  if(any(is.infinite(col_data))) {
+    max_finite <- max(col_data[is.finite(col_data)], na.rm = TRUE)
+    min_finite <- min(col_data[is.finite(col_data)], na.rm = TRUE)
+    eval_numeric_transformed[col_data == Inf, i] <- max_finite
+    eval_numeric_transformed[col_data == -Inf, i] <- min_finite
+  }
+}
+
+# Re-attach the Row_ID to the transformed numeric data
+eval_numeric_transformed$Row_ID <- eval_numeric$Row_ID
+
+# Re-couple processed numerical columns with categorical keys using an explicit join on Row_ID
+final_eval_set <- eval_categorical %>% 
+  left_join(eval_numeric_transformed, by = "Row_ID")
+
+# Ensure final_eval_set matches the exact row order and count of the original data
+final_eval_set <- evaluation_data %>% 
+  select(Row_ID) %>% 
+  left_join(final_eval_set, by = "Row_ID") %>% 
+  select(-Row_ID)
+
+# Final Model Safety: Impute any structural NAs generated during processing to guarantee a complete matrix
+for(i in 1:ncol(final_eval_set)) {
+  if(is.numeric(final_eval_set[, i]) && any(is.na(final_eval_set[, i]))) {
+    median_val <- median(final_eval_set[, i], na.rm = TRUE)
+    final_eval_set[is.na(final_eval_set[, i]), i] <- median_val
+  }
+}
+
+```
+
+## Generating and Saving Final pH Predictions
+
+We utilize the winning model to calculate the evaluation pH values and export the completed dataset to a clean CSV file.
+
+```{r}
+
+library(writexl)
+
+# Predict final pH values using the winning Random Forest model
+final_predictions <- predict(model_rf, newdata = final_eval_set)
+
+# Append the complete prediction vector back to the original evaluation structure
+evaluation_output <- evaluation_data %>%
+  mutate(PH = as.vector(final_predictions)) %>%
+  select(-Row_ID)
+
+
+# Export the final complete dataset as an Excel file
+write_xlsx(evaluation_output, "StudentEvaluation_Predictions.xlsx")
+
+# Print verification check to guarantee all original rows are preserved
+print(paste("Predictions successfully generated for", nrow(evaluation_output), "rows."))
+head(evaluation_output %>% select(Brand.Code, any_of("MFR"), PH), 10)
+```
+
+# Project Conclusion & Summary
+
+With the final predictions successfully exported to StudentEvaluation_Predictions.xlsx, the predictive modeling pipeline is complete.
+
+## Key Technical Takeaways:
+
+Data Preprocessing Impact: Implementing a robust mathematical pipeline (KNN Imputation, Box-Cox transformations, centering, and scaling) was critical to handle missing values and stabilize variance across highly skewed beverage manufacturing features.
+
+Model Selection: The Random Forest architecture outperformed simpler linear frameworks, demonstrating superior capability in capturing complex, non-linear interactions among the chemical and physical properties of the data.
+
+Pipeline Integrity: The development of structural safety patches ensured that the final evaluation set exactly preserved its original 267 rows, guaranteeing zero data loss during prediction and a seamless deployment.
